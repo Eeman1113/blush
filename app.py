@@ -1,6 +1,5 @@
 import streamlit as st
 import cv2
-import mediapipe as mp
 import numpy as np
 from sklearn.cluster import KMeans
 from PIL import Image
@@ -10,14 +9,9 @@ st.set_page_config(page_title="Blush & Skin Tone Analyzer", layout="wide")
 
 class SkinToneAnalyzer:
     def __init__(self):
-        self.mp_face_mesh = mp.solutions.face_mesh
-        # Initialize FaceMesh with static image mode
-        self.face_mesh = self.mp_face_mesh.FaceMesh(
-            static_image_mode=True,
-            max_num_faces=1,
-            refine_landmarks=True,
-            min_detection_confidence=0.5
-        )
+        # Load OpenCV's pre-trained face detector
+        # We use the default path included in cv2.data
+        self.face_cascade = cv2.CascadeClassifier(cv2.data.haarcascades + 'haarcascade_frontalface_default.xml')
         
         # Blush Recommendations Database
         self.blush_recommendations = {
@@ -73,42 +67,56 @@ class SkinToneAnalyzer:
 
     def process_image(self, image_array):
         """
-        Processes the image array (RGB) to detect skin tone.
+        Processes the image array (RGB) to detect skin tone using Haar Cascades.
         """
-        height, width, _ = image_array.shape
-        results = self.face_mesh.process(image_array)
-
-        if not results.multi_face_landmarks:
-            return None, None
-
-        landmarks = results.multi_face_landmarks[0].landmark
-
-        # Indices for cheeks (Left and Right)
-        cheek_indices = [116, 117, 118, 100, 126, 209, 345, 346, 347, 329, 355, 429]
+        gray = cv2.cvtColor(image_array, cv2.COLOR_RGB2GRAY)
         
-        mask = np.zeros((height, width), dtype=np.uint8)
-        points = []
+        # Detect faces
+        faces = self.face_cascade.detectMultiScale(gray, scaleFactor=1.1, minNeighbors=5, minSize=(30, 30))
         
-        for idx in cheek_indices:
-            x = int(landmarks[idx].x * width)
-            y = int(landmarks[idx].y * height)
-            points.append((x, y))
+        if len(faces) == 0:
+            return None
 
-        hull = cv2.convexHull(np.array(points))
-        cv2.fillConvexPoly(mask, hull, 255)
+        # Process the largest face found
+        faces = sorted(faces, key=lambda f: f[2] * f[3], reverse=True)
+        (x, y, w, h) = faces[0]
+
+        # --- Geometric Estimation of Cheek Areas ---
+        # Cheeks are generally located in the middle vertical third, 
+        # and the outer horizontal quarters of the face box.
         
-        # Extract skin pixels
-        skin_pixels = image_array[mask == 255]
+        # Define Regions of Interest (ROIs) relative to face box
+        # Left Cheek (Viewer's Left)
+        lc_x1, lc_x2 = x + int(0.15 * w), x + int(0.35 * w)
+        lc_y1, lc_y2 = y + int(0.45 * h), y + int(0.65 * h)
         
-        if len(skin_pixels) == 0:
-            # Fallback to center crop if cheek extraction fails
-            center_x = int(landmarks[1].x * width)
-            center_y = int(landmarks[1].y * height)
+        # Right Cheek (Viewer's Right)
+        rc_x1, rc_x2 = x + int(0.65 * w), x + int(0.85 * w)
+        rc_y1, rc_y2 = y + int(0.45 * h), y + int(0.65 * h)
+        
+        # Crop crops
+        left_cheek = image_array[lc_y1:lc_y2, lc_x1:lc_x2]
+        right_cheek = image_array[rc_y1:rc_y2, rc_x1:rc_x2]
+        
+        # Combine samples
+        if left_cheek.size > 0 and right_cheek.size > 0:
+            # Stack pixels vertically
+            skin_pixels = np.vstack((left_cheek.reshape(-1, 3), right_cheek.reshape(-1, 3)))
+        elif left_cheek.size > 0:
+            skin_pixels = left_cheek.reshape(-1, 3)
+        elif right_cheek.size > 0:
+            skin_pixels = right_cheek.reshape(-1, 3)
+        else:
+            # Fallback to center patch if geometry fails
+            center_x, center_y = x + w//2, y + h//2
             skin_pixels = image_array[center_y-10:center_y+10, center_x-10:center_x+10].reshape(-1, 3)
 
         return skin_pixels
 
     def get_dominant_color(self, pixels):
+        if len(pixels) == 0:
+            return np.array([200, 150, 130]) # Default fallback
+            
         kmeans = KMeans(n_clusters=1, n_init=10)
         kmeans.fit(pixels)
         return kmeans.cluster_centers_[0].astype(int)
@@ -142,6 +150,7 @@ uploaded_file = st.file_uploader("Choose an image...", type=["jpg", "jpeg", "png
 if uploaded_file is not None:
     # Convert the file to an image
     image = Image.open(uploaded_file)
+    # Fix orientation if needed by converting properly
     image_array = np.array(image.convert('RGB'))
     
     st.image(image, caption='Uploaded Image', width=300)
@@ -216,4 +225,4 @@ if uploaded_file is not None:
 
 # Footer
 st.markdown("---")
-st.caption("Analysis based on cheek area sampling and LAB color space logic.")
+st.caption("Analysis based on automated cheek area detection and LAB color space logic.")
